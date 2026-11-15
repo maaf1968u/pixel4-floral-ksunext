@@ -39,6 +39,43 @@ susfs_branch_for() {
 	esac
 }
 
+# susfs_fixup_fdinfo -- repair fs/notify/fdinfo.c after the susfs kernel patch.
+#
+# susfs4ksu's non-GKI 50_add_susfs patch rewrites inotify_fdinfo() assuming a
+# base tree that already has inotify_mark_user_mask() and whose fallback print
+# uses it. The android-msm-coral-4.14 tree instead has the classic
+# `u32 mask = mark->mask & IN_ALL_EVENTS` form, so the hunk applies with fuzz
+# and leaves three defects, all confined to this one file:
+#   1. inotify_mark_user_mask() is called but never defined.
+#   2. a label (out_seq_printf:) ends up directly before a declaration.
+#   3. show_fdinfo() gains a 3rd arg under CONFIG_KSU_SUSFS_SUS_MOUNT but
+#      fanotify_fdinfo() is not updated to match the function-pointer type.
+# All three are patched here; everything stays gated on CONFIG_KSU_SUSFS_SUS_MOUNT
+# so a build without sus_mount is unaffected.
+susfs_fixup_fdinfo() {
+	local f="${KERNEL_DIR}/fs/notify/fdinfo.c"
+	[ -f "$f" ] || return 0
+	grep -q 'inotify_mark_user_mask' "$f" || return 0
+	grep -q 'SUSFS_FDINFO_FIX' "$f" && return 0
+	info "fixing fs/notify/fdinfo.c (susfs4ksu non-GKI patch vs 4.14 tree)"
+	awk '
+		{ print }
+		/^#ifdef CONFIG_INOTIFY_USER$/ && !done {
+			print "/* SUSFS_FDINFO_FIX */"
+			print "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
+			print "static inline u32 inotify_mark_user_mask(struct fsnotify_mark *mark)"
+			print "{"
+			print "\treturn mark->mask & IN_ALL_EVENTS;"
+			print "}"
+			print "#endif"
+			done=1
+		}
+	' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+	sed -i 's/^out_seq_printf:$/out_seq_printf: ;/' "$f"
+	perl -0pi -e 's/\nstatic void fanotify_fdinfo\(struct seq_file \*m, struct fsnotify_mark \*mark\)\n\{/\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\nstatic void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark, struct file *file)\n#else\nstatic void fanotify_fdinfo(struct seq_file *m, struct fsnotify_mark *mark)\n#endif\n{\n#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\t(void)file;\n#endif/' "$f"
+	ok "fs/notify/fdinfo.c fixed"
+}
+
 susfs_apply() {
 	local repo=${SUSFS_REPO:-https://gitlab.com/simonpunk/susfs4ksu.git}
 	local branch=${SUSFS_BRANCH:-auto}
@@ -84,6 +121,9 @@ susfs_apply() {
 		|| die "the SUSFS kernel patch did not apply cleanly.
        This usually means SUSFS_BRANCH does not match your kernel. Detected
        kernel ${kver}, used branch '${branch}'."
+
+	# 2b. Repair fs/notify/fdinfo.c (the one file the non-GKI patch mangles).
+	susfs_fixup_fdinfo
 
 	# 3. Patch the KernelSU side -- but only when the variant does not already
 	#    ship SUSFS support. SukiSU-Ultra's 'builtin' branch, for instance,
