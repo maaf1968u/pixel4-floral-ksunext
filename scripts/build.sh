@@ -137,9 +137,17 @@ build_kernel() {
 	make -j"$(nproc --all)" CC=clang $args "${KERNEL_CONFIG}" \
 		|| die "defconfig generation failed"
 
-	info "make ${args}"
+	# Build only what the boot/AnyKernel flash needs: the kernel image target
+	# (which pulls in the base DTBs it appends). The full "all" target also
+	# builds every dtbo overlay, and a single broken overlay (e.g. coral's
+	# sm8150-coral-dvt-overlay.dtbo failing dtc) would abort an otherwise good
+	# kernel. Add dtbo.img only when the device actually needs a fresh one.
+	local target="${KERNEL_IMAGE_NAME}"
+	is_true "${NEED_DTBO:-false}" && target="${target} dtbo.img"
+
+	info "make ${args} ${target}"
 	# shellcheck disable=SC2086
-	make -j"$(nproc --all)" CC="$cc" $args \
+	make -j"$(nproc --all)" CC="$cc" $args $target \
 		|| die "kernel build failed"
 
 	endgroup
